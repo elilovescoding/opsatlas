@@ -1,0 +1,96 @@
+name: opsatlas
+services:
+  database:
+    image: opsatlas-database:${IMAGE_TAG:-local}
+    build: ./infrastructure/database
+    environment:
+      POSTGRES_DB: opsatlas
+      POSTGRES_USER: opsatlas
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    networks: [data]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -h 127.0.0.1 -U opsatlas -d opsatlas"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+    mem_limit: 384m
+    security_opt: [no-new-privileges:true]
+  demo-targets:
+    image: opsatlas-demo-targets:${IMAGE_TAG:-local}
+    build: ./infrastructure/demo-targets
+    working_dir: /app
+    command: [node, /app/demo-targets.mjs]
+    environment: { DEMO_BIND: 0.0.0.0 }
+    volumes: [./scripts/demo-targets.mjs:/app/demo-targets.mjs:ro]
+    networks:
+      app: { ipv4_address: 172.30.0.10 }
+    healthcheck:
+      test: [CMD, node, -e, "require('node:http').get('http://127.0.0.1:9090/health', { agent: false }, r => { r.resume(); process.exitCode = r.statusCode === 200 ? 0 : 1; }).on('error', () => { process.exitCode = 1; })"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 64m
+    restart: unless-stopped
+  backend:
+    image: opsatlas-backend:${IMAGE_TAG:-local}
+    build: ./backend
+    environment:
+      DATABASE_URL: jdbc:postgresql://database:5432/opsatlas
+      DATABASE_USER: opsatlas
+      DATABASE_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      BOOTSTRAP_EMAIL: ${BOOTSTRAP_EMAIL:?Set BOOTSTRAP_EMAIL}
+      BOOTSTRAP_PASSWORD: ${BOOTSTRAP_PASSWORD:?Set BOOTSTRAP_PASSWORD}
+      DEMO_ENABLED: ${DEMO_ENABLED:-true}
+      REGISTRATION_ENABLED: ${REGISTRATION_ENABLED:-true}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      MONITOR_HOST: 172.30.0.10
+      MANAGEMENT_ADDRESS: 0.0.0.0
+    depends_on:
+      database: { condition: service_healthy }
+      demo-targets: { condition: service_healthy }
+    networks: [app, data]
+    read_only: true
+    tmpfs: [/tmp:size=64m]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 768m
+    restart: unless-stopped
+  frontend:
+    image: opsatlas-frontend:${IMAGE_TAG:-local}
+    build: ./frontend
+    ports: ["127.0.0.1:${WEB_PORT:-8088}:8080"]
+    depends_on:
+      backend: { condition: service_healthy }
+    networks: [app]
+    read_only: true
+    tmpfs: [/tmp:size=32m]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 96m
+    restart: unless-stopped
+  prometheus:
+    image: prom/prometheus:v3.16.0
+    profiles: [observability]
+    command: [--config.file=/etc/prometheus/prometheus.yml, --storage.tsdb.retention.time=7d]
+    ports: ["127.0.0.1:9091:9090"]
+    volumes: [./infrastructure/prometheus.yml:/etc/prometheus/prometheus.yml:ro, prometheus_data:/prometheus]
+    networks: [app]
+    mem_limit: 192m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+volumes:
+  postgres_data:
+  prometheus_data:
+networks:
+  app:
+    ipam:
+      config: [{ subnet: 172.30.0.0/24 }]
+  data:
+    internal: true

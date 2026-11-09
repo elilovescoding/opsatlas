@@ -1,0 +1,109 @@
+name: Continuous integration
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+          cache-dependency-path: backend/pom.xml
+      - run: mvn -B -ntp -f backend/pom.xml spotless:check verify
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+      - run: mvn -B -ntp -f backend/pom.xml dependency:list -DincludeScope=runtime -DoutputFile=target/runtime-dependencies.txt
+      - run: node scripts/audit-maven.mjs
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        if: always()
+        with:
+          name: backend-test-results
+          path: backend/target/surefire-reports/
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: node scripts/check-secrets.mjs
+        working-directory: .
+      - run: npm ci
+      - run: npm run lint && npm run format:check && npm test && npm run build
+      - run: npm audit --audit-level=moderate
+  infrastructure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_version: '1.13.5'
+      - run: terraform -chdir=infrastructure/terraform fmt -check -recursive
+      - run: terraform -chdir=infrastructure/terraform init -backend=false -input=false
+      - run: terraform -chdir=infrastructure/terraform validate
+      - run: bash -n scripts/deploy.sh
+  containers-and-browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Generate ephemeral test credentials
+        shell: bash
+        run: |
+          db_password=$(openssl rand -hex 24)
+          admin_password=$(openssl rand -hex 24)
+          echo "::add-mask::$db_password"
+          echo "::add-mask::$admin_password"
+          printf 'POSTGRES_PASSWORD=%s\nBOOTSTRAP_EMAIL=ci@example.test\nBOOTSTRAP_PASSWORD=%s\nDEMO_ENABLED=true\n' "$db_password" "$admin_password" > .env
+          echo "BOOTSTRAP_EMAIL=ci@example.test" >> "$GITHUB_ENV"
+          echo "BOOTSTRAP_PASSWORD=$admin_password" >> "$GITHUB_ENV"
+      - run: docker compose config --quiet
+      - run: docker compose up --build --wait --wait-timeout 180
+      - run: npm ci --prefix frontend
+      - run: cd frontend && npx playwright install --with-deps chromium
+      - run: npm --prefix frontend run test:e2e
+        env:
+          E2E_BASE_URL: http://127.0.0.1:8088
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        if: failure()
+        with:
+          name: browser-failure-evidence
+          path: frontend/test-results/**/*.png
+          retention-days: 1
+      - name: Collect container state
+        if: always()
+        run: docker compose ps && docker compose logs --tail=100
+      - run: docker compose down
+        if: always()

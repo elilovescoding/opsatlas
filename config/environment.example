@@ -1,0 +1,14 @@
+# Copy this template to .env and replace the required values. .env is never tracked.
+POSTGRES_PASSWORD=
+BOOTSTRAP_EMAIL=admin@example.com
+# At least 16 characters, at most 72 UTF-8 bytes. Used only when this account is absent.
+BOOTSTRAP_PASSWORD=
+DEMO_ENABLED=true
+REGISTRATION_ENABLED=true
+COOKIE_SECURE=false
+WEB_PORT=8088
+# Cloud overlay only: registered domain and email for automatic TLS certificates.
+DOMAIN=
+ACME_EMAIL=
+AWS_REGION=us-east-1
+CLOUDWATCH_LOG_GROUP=/opsatlas/containers

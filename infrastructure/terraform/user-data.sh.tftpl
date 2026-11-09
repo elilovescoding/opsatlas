@@ -1,0 +1,62 @@
+#!/bin/bash
+set -euo pipefail
+dnf update -y
+dnf install -y docker jq xfsprogs dnf-plugins-core
+systemctl enable --now docker amazon-ssm-agent
+# Use the packaged Compose plugin from Docker's official repository.
+dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+dnf install -y docker-compose-plugin --releasever=9
+mkdir -p /opt/opsatlas/releases /srv/opsatlas-data
+chmod 700 /opt/opsatlas
+cat > /usr/local/sbin/opsatlas-storage <<'STORAGE'
+#!/bin/bash
+set -euo pipefail
+device=/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_${volume_id}
+for i in $(seq 1 120); do test -b "$device" && break; sleep 2; done
+test -b "$device"
+fstype=$(blkid -s TYPE -o value "$device" || true)
+if [ -z "$fstype" ]; then mkfs.xfs "$device"; elif [ "$fstype" != xfs ]; then echo 'Unexpected filesystem; refusing to overwrite' >&2; exit 1; fi
+uuid=$(blkid -s UUID -o value "$device")
+grep -q "UUID=$uuid " /etc/fstab || echo "UUID=$uuid /srv/opsatlas-data xfs defaults,nofail 0 2" >> /etc/fstab
+mountpoint -q /srv/opsatlas-data || mount /srv/opsatlas-data
+mkdir -p /srv/opsatlas-data/postgres
+STORAGE
+chmod 700 /usr/local/sbin/opsatlas-storage
+cat > /etc/systemd/system/opsatlas-storage.service <<'UNIT'
+[Unit]
+Description=Mount OpsAtlas persistent database volume
+After=network-online.target
+Before=docker.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/opsatlas-storage
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
+UNIT
+mkdir -p /etc/systemd/system/docker.service.d
+cat > /etc/systemd/system/docker.service.d/opsatlas-storage.conf <<'UNIT'
+[Unit]
+Requires=opsatlas-storage.service
+After=opsatlas-storage.service
+UNIT
+systemctl daemon-reload
+systemctl enable --now opsatlas-storage.service
+# Block link-local/metadata access from bridged containers; the host daemon uses IMDSv2.
+iptables -C DOCKER-USER -d 169.254.0.0/16 -j REJECT || iptables -I DOCKER-USER -d 169.254.0.0/16 -j REJECT
+cat > /etc/systemd/system/opsatlas-metadata-guard.service <<'UNIT'
+[Unit]
+Description=Block container access to link-local metadata
+After=docker.service
+Requires=docker.service
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'iptables -C DOCKER-USER -d 169.254.0.0/16 -j REJECT || iptables -I DOCKER-USER -d 169.254.0.0/16 -j REJECT'
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable opsatlas-metadata-guard.service
+# No application or credentials are deployed by Terraform. Configure .env through SSM,
+# then explicitly invoke the separate manual deployment workflow after approval.

@@ -1,0 +1,44 @@
+# Requires Compose >=2.24.6. Use with the base file; never deploy automatically.
+x-cloud-logs: &cloud-logs
+  driver: awslogs
+  options:
+    awslogs-region: ${AWS_REGION:?Set AWS_REGION}
+    awslogs-group: ${CLOUDWATCH_LOG_GROUP:?Set CLOUDWATCH_LOG_GROUP}
+    awslogs-create-group: "false"
+services:
+  database:
+    logging: *cloud-logs
+  demo-targets:
+    logging: *cloud-logs
+  backend:
+    environment:
+      COOKIE_SECURE: "true"
+      REGISTRATION_ENABLED: ${REGISTRATION_ENABLED:-false}
+    logging: *cloud-logs
+  frontend:
+    ports: !reset []
+    logging: *cloud-logs
+  edge:
+    image: opsatlas-edge:${IMAGE_TAG:-local}
+    build: ./infrastructure/edge
+    ports: ["80:80", "443:443"]
+    environment:
+      DOMAIN: ${DOMAIN:?Set DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL:?Set ACME_EMAIL}
+    volumes: [./infrastructure/Caddyfile:/etc/caddy/Caddyfile:ro, caddy_data:/data, caddy_config:/config]
+    networks: [app]
+    depends_on:
+      frontend: { condition: service_healthy }
+    mem_limit: 96m
+    security_opt: [no-new-privileges:true]
+    logging: *cloud-logs
+    restart: unless-stopped
+volumes:
+  postgres_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /srv/opsatlas-data/postgres
+  caddy_data:
+  caddy_config:
